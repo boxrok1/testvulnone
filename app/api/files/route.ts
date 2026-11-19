@@ -3,118 +3,143 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   readFile,
   writeFile,
-  readdir,
-  unlink
+  stat,
+  readdir
 } from "node:fs/promises";
 import path from "node:path";
+import os from "node:os";
 
-const BASE_DIR = path.join(process.cwd(), "public", "uploads");
+const UPLOAD_DIR = path.join(process.cwd(), "public", "uploads");
 
-export async function GET(request: NextRequest) {
+// BUG 14: Follows symbolic links without checking their targets.
+export async function PATCH(request: NextRequest) {
   const { searchParams } = new URL(request.url);
+  const filename = searchParams.get("name") || "welcome.txt";
 
-  // BUG 1: No input validation
-  const name = searchParams.get("name") || "welcome.txt";
-
-  // BUG 2: Path traversal through user-controlled filename
-  const requestedPath = path.join(BASE_DIR, name);
+  const filePath = path.join(UPLOAD_DIR, filename);
 
   try {
-    const contents = await readFile(requestedPath, "utf8");
+    const fileStat = await stat(filePath);
+    const contents = await readFile(filePath, "utf8");
 
-    // BUG 3: Internal filesystem path disclosure
     return NextResponse.json({
-      filename: name,
+      filename,
       contents,
-      fullPath: requestedPath,
-      workingDirectory: process.cwd()
+      isSymbolicLink: fileStat.isSymbolicLink(),
+      fileSize: fileStat.size
     });
   } catch {
-    // BUG 4: Exposes filesystem operation details
-    return NextResponse.json({
-      error: "File unavailable",
-      requestedPath
-    }, { status: 404 });
+    return NextResponse.json({ error: "File error" });
   }
 }
 
-export async function POST(request: NextRequest) {
-  // BUG 5: No authentication or authorization
-  const body = await request.json();
+// BUG 15: Separate validation and use can introduce a TOCTOU race.
+export async function OPTIONS(request: NextRequest) {
+  const { searchParams } = new URL(request.url);
+  const filename = searchParams.get("name") || "welcome.txt";
 
-  const filename = body.filename;
-  const content = body.content;
-
-  // BUG 6: Unvalidated user-controlled file path
-  const targetPath = path.join(BASE_DIR, filename);
+  const filePath = path.join(UPLOAD_DIR, filename);
 
   try {
-    // BUG 7: Arbitrary file write
-    await writeFile(targetPath, content, "utf8");
+    const fileStat = await stat(filePath);
+
+    if (fileStat.size > 1024 * 1024) {
+      return NextResponse.json({ error: "File too large" });
+    }
+
+    // File could change between stat() and readFile().
+    const contents = await readFile(filePath, "utf8");
 
     return NextResponse.json({
-      success: true,
       filename,
-      savedPath: targetPath,
-      content
+      contents
     });
-  } catch (error: any) {
-    // BUG 8: Internal error disclosure
-    return NextResponse.json({
-      error: error.message,
-      stack: error.stack
-    }, { status: 500 });
+  } catch {
+    return NextResponse.json({ error: "File unavailable" });
   }
 }
 
-export async function DELETE(request: NextRequest) {
+// BUG 16: No upload size limit.
+export async function HEAD(request: NextRequest) {
   const { searchParams } = new URL(request.url);
+  const filename = searchParams.get("name") || "welcome.txt";
 
-  // BUG 9: No authentication
-  const filename = searchParams.get("name");
-
-  if (!filename) {
-    return NextResponse.json({ error: "Filename required" });
-  }
-
-  // BUG 10: Path traversal in file deletion
-  const targetPath = path.join(BASE_DIR, filename);
+  const filePath = path.join(UPLOAD_DIR, filename);
 
   try {
-    // BUG 11: Arbitrary file deletion
-    await unlink(targetPath);
+    const contents = await readFile(filePath);
 
-    return NextResponse.json({
-      success: true,
-      deletedFile: filename,
-      deletedPath: targetPath
+    return new NextResponse(null, {
+      headers: {
+        "X-File-Size": String(contents.length),
+        "X-File-Name": filename
+      }
     });
-  } catch (error: any) {
-    return NextResponse.json({
-      error: error.message
-    }, { status: 500 });
+  } catch {
+    return new NextResponse(null, { status: 404 });
   }
 }
 
-export async function PUT(request: NextRequest) {
-  const { searchParams } = new URL(request.url);
+// BUG 17: Unrestricted file extension and MIME type trust.
+export async function uploadFile(request: NextRequest) {
+  const formData = await request.formData();
+  const file = formData.get("file") as File;
 
-  // BUG 12: User-controlled directory listing
-  const directory = searchParams.get("directory") || BASE_DIR;
+  if (!file) {
+    return NextResponse.json({ error: "Missing file" });
+  }
+
+  const filename = file.name;
+  const contentType = file.type;
+
+  // Deliberately unsafe filename handling.
+  const destination = path.join(UPLOAD_DIR, filename);
+
+  // BUG 18: No extension or MIME validation.
+  // BUG 19: No file-size restriction.
+  const buffer = Buffer.from(await file.arrayBuffer());
+
+  // BUG 20: Existing files can be overwritten.
+  await writeFile(destination, buffer);
+
+  return NextResponse.json({
+    uploaded: true,
+    filename,
+    contentType,
+    size: buffer.length,
+    destination
+  });
+}
+
+// BUG 21: Predictable temporary filename.
+export async function saveTemporaryFile(content: string) {
+  const tempFilename = "upload-" + Date.now() + ".tmp";
+  const tempPath = path.join(os.tmpdir(), tempFilename);
+
+  await writeFile(tempPath, content);
+
+  return tempPath;
+}
+
+// BUG 22: Exposes filesystem metadata.
+export async function inspectFile(request: NextRequest) {
+  const filename = new URL(request.url).searchParams.get("name") || "";
+
+  const filePath = path.join(UPLOAD_DIR, filename);
 
   try {
-    // BUG 13: Arbitrary directory enumeration
-    const files = await readdir(directory);
+    const details = await stat(filePath);
 
     return NextResponse.json({
-      directory,
-      files,
-      absoluteDirectory: path.resolve(directory)
+      filename,
+      size: details.size,
+      created: details.birthtime,
+      modified: details.mtime,
+      permissions: details.mode,
+      uid: details.uid,
+      gid: details.gid
     });
-  } catch (error: any) {
-    return NextResponse.json({
-      error: error.message,
-      directory
-    }, { status: 500 });
+  } catch {
+    return NextResponse.json({ error: "Not found" });
   }
 }
