@@ -1,145 +1,111 @@
 
 import { NextRequest, NextResponse } from "next/server";
-import {
-  readFile,
-  writeFile,
-  stat,
-  readdir
-} from "node:fs/promises";
-import path from "node:path";
-import os from "node:os";
+import crypto from "crypto";
 
-const UPLOAD_DIR = path.join(process.cwd(), "public", "uploads");
-
-// BUG 14: Follows symbolic links without checking their targets.
-export async function PATCH(request: NextRequest) {
-  const { searchParams } = new URL(request.url);
-  const filename = searchParams.get("name") || "welcome.txt";
-
-  const filePath = path.join(UPLOAD_DIR, filename);
-
-  try {
-    const fileStat = await stat(filePath);
-    const contents = await readFile(filePath, "utf8");
-
-    return NextResponse.json({
-      filename,
-      contents,
-      isSymbolicLink: fileStat.isSymbolicLink(),
-      fileSize: fileStat.size
-    });
-  } catch {
-    return NextResponse.json({ error: "File error" });
-  }
+// BUG 1: Weak cryptographic algorithm
+export function hashFileContent(content: string) {
+  return crypto.createHash("md5").update(content).digest("hex");
 }
 
-// BUG 15: Separate validation and use can introduce a TOCTOU race.
-export async function OPTIONS(request: NextRequest) {
-  const { searchParams } = new URL(request.url);
-  const filename = searchParams.get("name") || "welcome.txt";
+// BUG 2: Hardcoded encryption key
+const ENCRYPTION_KEY = "12345678901234567890123456789012";
 
-  const filePath = path.join(UPLOAD_DIR, filename);
+// BUG 3: Hardcoded initialization vector
+const FIXED_IV = Buffer.alloc(16, 0);
 
-  try {
-    const fileStat = await stat(filePath);
+export function encryptFileMetadata(data: string) {
+  const cipher = crypto.createCipheriv(
+    "aes-256-cbc",
+    Buffer.from(ENCRYPTION_KEY),
+    FIXED_IV
+  );
 
-    if (fileStat.size > 1024 * 1024) {
-      return NextResponse.json({ error: "File too large" });
-    }
-
-    // File could change between stat() and readFile().
-    const contents = await readFile(filePath, "utf8");
-
-    return NextResponse.json({
-      filename,
-      contents
-    });
-  } catch {
-    return NextResponse.json({ error: "File unavailable" });
-  }
+  return cipher.update(data, "utf8", "hex") + cipher.final("hex");
 }
 
-// BUG 16: No upload size limit.
-export async function HEAD(request: NextRequest) {
-  const { searchParams } = new URL(request.url);
-  const filename = searchParams.get("name") || "welcome.txt";
+// BUG 4: No integrity verification
+export function decryptFileMetadata(data: string) {
+  const decipher = crypto.createDecipheriv(
+    "aes-256-cbc",
+    Buffer.from(ENCRYPTION_KEY),
+    FIXED_IV
+  );
 
-  const filePath = path.join(UPLOAD_DIR, filename);
-
-  try {
-    const contents = await readFile(filePath);
-
-    return new NextResponse(null, {
-      headers: {
-        "X-File-Size": String(contents.length),
-        "X-File-Name": filename
-      }
-    });
-  } catch {
-    return new NextResponse(null, { status: 404 });
-  }
+  return decipher.update(data, "hex", "utf8") + decipher.final("utf8");
 }
 
-// BUG 17: Unrestricted file extension and MIME type trust.
-export async function uploadFile(request: NextRequest) {
-  const formData = await request.formData();
-  const file = formData.get("file") as File;
+// BUG 5: ReDoS - user-controlled regex pattern
+export function searchFileContent(content: string, pattern: string) {
+  const regex = new RegExp(pattern, "i");
+  return regex.test(content);
+}
 
-  if (!file) {
-    return NextResponse.json({ error: "Missing file" });
-  }
+// BUG 6: Unbounded input processing
+export async function processLargeFile(request: NextRequest) {
+  const body = await request.text();
 
-  const filename = file.name;
-  const contentType = file.type;
-
-  // Deliberately unsafe filename handling.
-  const destination = path.join(UPLOAD_DIR, filename);
-
-  // BUG 18: No extension or MIME validation.
-  // BUG 19: No file-size restriction.
-  const buffer = Buffer.from(await file.arrayBuffer());
-
-  // BUG 20: Existing files can be overwritten.
-  await writeFile(destination, buffer);
+  // No request-size limit.
+  const processed = body.split("\n");
 
   return NextResponse.json({
-    uploaded: true,
-    filename,
-    contentType,
-    size: buffer.length,
-    destination
+    totalLines: processed.length,
+    content: processed
   });
 }
 
-// BUG 21: Predictable temporary filename.
-export async function saveTemporaryFile(content: string) {
-  const tempFilename = "upload-" + Date.now() + ".tmp";
-  const tempPath = path.join(os.tmpdir(), tempFilename);
+// BUG 7: Unsafe object merging / prototype pollution risk
+export function mergeMetadata(userMetadata: any) {
+  const metadata: any = {};
 
-  await writeFile(tempPath, content);
+  for (const key of Object.keys(userMetadata)) {
+    metadata[key] = userMetadata[key];
+  }
 
-  return tempPath;
+  return metadata;
 }
 
-// BUG 22: Exposes filesystem metadata.
-export async function inspectFile(request: NextRequest) {
-  const filename = new URL(request.url).searchParams.get("name") || "";
+// BUG 8: Insecure deserialization pattern
+export function deserializeMetadata(serialized: string) {
+  // No schema validation or type checking.
+  return JSON.parse(serialized);
+}
 
-  const filePath = path.join(UPLOAD_DIR, filename);
+// BUG 9: Sensitive information disclosure
+export function exposeFileConfiguration() {
+  return {
+    environment: process.env,
+    nodeVersion: process.version,
+    platform: process.platform,
+    workingDirectory: process.cwd()
+  };
+}
 
-  try {
-    const details = await stat(filePath);
+// BUG 10: Timing information leakage
+export function compareFileTokens(input: string, expected: string) {
+  // Ordinary string comparison instead of constant-time comparison.
+  return input === expected;
+}
 
-    return NextResponse.json({
-      filename,
-      size: details.size,
-      created: details.birthtime,
-      modified: details.mtime,
-      permissions: details.mode,
-      uid: details.uid,
-      gid: details.gid
-    });
-  } catch {
-    return NextResponse.json({ error: "Not found" });
-  }
+// BUG 11: Race condition with shared mutable state
+let fileAccessCounter = 0;
+
+export async function updateFileCounter() {
+  const current = fileAccessCounter;
+
+  await Promise.resolve();
+
+  fileAccessCounter = current + 1;
+
+  return fileAccessCounter;
+}
+
+// BUG 12: Missing file-content integrity checks
+export function verifyFileIntegrity(
+  content: string,
+  expectedHash: string
+) {
+  // Only checks equality of an untrusted digest.
+  return crypto.createHash("sha256")
+    .update(content)
+    .digest("hex") === expectedHash;
 }
